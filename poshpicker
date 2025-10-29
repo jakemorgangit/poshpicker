@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+#
+# poshpicker — Interactive Oh My Posh theme chooser for bash
+# https://github.com/<yourusername>/poshpicker
+#
+
+# -------------
+# Configuration
+# -------------
+APP_NAME="poshpicker"
+APP_DIR="$HOME/.local/share/$APP_NAME"
+THEME_DIR="$APP_DIR/poshthemes"
+CONFIG_LINK="$HOME/.poshtheme.json"
+BASHRC="$HOME/.bashrc"
+FAV_FILE="$HOME/.poshpicker_favs"
+
+# -------------
+# Bootstrap logic
+# -------------
+
+ensure_themes() {
+    if [ -d "$THEME_DIR" ] && [ "$(find "$THEME_DIR" -type f -name '*.omp.json' | wc -l)" -gt 0 ]; then
+        return
+    fi
+
+    echo "Obtaining Oh My Posh themes..."
+    tmpdir="$(mktemp -d)"
+    (
+        cd "$tmpdir" || exit 1
+        git clone --depth=1 https://github.com/JanDeDobbeleer/oh-my-posh.git >/dev/null 2>&1
+        mkdir -p "$THEME_DIR"
+        mv oh-my-posh/themes/* "$THEME_DIR"/
+        rm -rf oh-my-posh
+    )
+    rm -rf "$tmpdir"
+    echo "Themes installed to $THEME_DIR"
+}
+
+ensure_installed() {
+    local target="/usr/local/bin/$APP_NAME"
+
+    if [ ! -f "$target" ] || ! cmp -s "$0" "$target"; then
+        echo "Installing $APP_NAME system-wide to $target"
+        sudo mkdir -p /usr/local/bin
+        sudo cp "$0" "$target"
+        sudo chmod +x "$target"
+        echo "You can now run '$APP_NAME' from anywhere."
+    fi
+}
+
+# -------------
+# Theme previewer and menu (from your working version)
+# -------------
+
+declare -A FAVS
+VIEW_FAVS=false
+index=0
+
+load_favs() {
+    FAVS=()
+    if [[ -f "$FAV_FILE" ]]; then
+        while IFS= read -r fav; do
+            [ -n "$fav" ] && FAVS["$fav"]=1
+        done < "$FAV_FILE"
+    fi
+}
+
+get_current_list() {
+    if $VIEW_FAVS && [ "${#FAVS[@]}" -gt 0 ]; then
+        printf '%s\n' "${!FAVS[@]}" | sort
+    else
+        find "$THEME_DIR" -maxdepth 1 -type f -name '*.omp.json' | sort
+    fi
+}
+
+preview_theme() {
+    local theme_file="$1"
+    clear
+    echo "============================================================"
+    echo " Theme: $(basename "$theme_file")"
+    echo "============================================================"
+    echo "Controls: n=next p=prev s=save+quit f=fav v=view favs q=quit"
+    echo "============================================================"
+    echo
+    eval "$(oh-my-posh init bash --config "$theme_file")"
+    oh-my-posh print primary --config "$theme_file"
+    echo
+    [[ ${FAVS["$theme_file"]+x} ]] && echo "★ Favourite"
+    $VIEW_FAVS && echo "(Viewing favourites only)"
+    echo
+}
+
+save_theme() {
+    local theme_file="$1"
+    local INIT_LINE='eval "$(oh-my-posh init bash --config ~/.poshtheme.json)"'
+
+    echo
+    echo "Saving theme '$(basename "$theme_file")' ..."
+    ln -sf "$theme_file" "$CONFIG_LINK"
+
+    if ! grep -Fq "$INIT_LINE" "$BASHRC"; then
+        {
+            echo ""
+            echo "# oh-my-posh initialisation (added by poshpicker)"
+            echo "$INIT_LINE"
+        } >> "$BASHRC"
+    fi
+
+    tmpfile="$(mktemp)"
+    awk -v init_line="$INIT_LINE" '
+        BEGIN { seen=0 }
+        {
+            if (index($0, init_line) > 0) {
+                if (seen==0) { print $0; seen=1; }
+            } else {
+                print $0
+            }
+        }
+    ' "$BASHRC" > "$tmpfile"
+    mv "$tmpfile" "$BASHRC"
+
+    echo "Linked ~/.poshtheme.json -> $theme_file"
+    echo ".bashrc updated."
+    set +eu 2>/dev/null
+    source "$BASHRC"
+    set -eu 2>/dev/null || true
+    echo
+    echo "✅ Theme saved and applied!"
+    echo "Exiting..."
+    sleep 1
+    clear
+    exit 0
+}
+
+toggle_fav() {
+    local theme_file="$1"
+    if [[ ${FAVS["$theme_file"]+x} ]]; then
+        unset "FAVS[$theme_file]"
+        echo "Removed from favourites: $(basename "$theme_file")"
+    else
+        FAVS["$theme_file"]=1
+        echo "Added to favourites: $(basename "$theme_file")"
+    fi
+    printf '%s\n' "${!FAVS[@]}" | sort > "$FAV_FILE"
+    sleep 0.8
+}
+
+toggle_view_mode() {
+    if $VIEW_FAVS; then
+        VIEW_FAVS=false
+    else
+        VIEW_FAVS=true
+    fi
+    if $VIEW_FAVS && [ "${#FAVS[@]}" -eq 0 ]; then
+        VIEW_FAVS=false
+        clear
+        echo "No favourites yet. Mark some with 'f'."
+        sleep 1
+    fi
+    index=0
+}
+
+# -------------
+# Main entrypoint
+# -------------
+
+ensure_themes
+load_favs
+ensure_installed
+
+mapfile -t CURRENT < <(get_current_list)
+(( ${#CURRENT[@]} )) || { echo "No themes found."; exit 1; }
+
+while true; do
+    (( index = (index + ${#CURRENT[@]}) % ${#CURRENT[@]} ))
+    theme="${CURRENT[$index]}"
+    preview_theme "$theme"
+
+    read -rsn1 key
+    case "$key" in
+        n|N) ((index++));;
+        p|P) ((index--));;
+        f|F) toggle_fav "$theme";;
+        v|V) toggle_view_mode; mapfile -t CURRENT < <(get_current_list);;
+        s|S) save_theme "$theme";;
+        q|Q) clear; echo "Exiting."; break;;
+    esac
+done
